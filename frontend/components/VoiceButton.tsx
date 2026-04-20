@@ -4,14 +4,14 @@ import { Mic, Square } from "lucide-react";
 
 interface Props {
   onTranscript: (text: string) => void;
-  botReply?: string;
   disabled?: boolean;
+  size?: "default" | "large";
   token?: string | null;
 }
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-export default function VoiceButton({ onTranscript, botReply, disabled, token }: Props) {
+export default function VoiceButton({ onTranscript, disabled, size = "default", token }: Props) {
   const [listening, setListening] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -20,16 +20,6 @@ export default function VoiceButton({ onTranscript, botReply, disabled, token }:
   const onTranscriptRef = useRef(onTranscript);
 
   useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
-
-  // TTS for bot reply via browser
-  useEffect(() => {
-    if (!botReply) return;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(
-      botReply.replace(/\s*(RESOLVED|UNRESOLVED)\s*/gi, "").trim()
-    );
-    window.speechSynthesis.speak(utterance);
-  }, [botReply]);
 
   async function startListening() {
     setError("");
@@ -92,13 +82,18 @@ export default function VoiceButton({ onTranscript, botReply, disabled, token }:
     else startListening();
   }
 
+  const buttonSize = size === "large" ? "w-14 h-14" : "w-10 h-10";
+  const iconSize = size === "large" ? "w-5 h-5" : "w-4 h-4";
+  const recordingLabel = size === "large" ? "Listening..." : "Recording…";
+  const loadingLabel = size === "large" ? "Transcribing voice..." : "Transcribing…";
+
   return (
     <div className="flex flex-col items-center gap-1">
       <button
         onClick={toggle}
         disabled={disabled || loading}
         title={listening ? "Stop & transcribe" : "Click to speak"}
-        className={`w-10 h-10 rounded-full flex items-center justify-center transition ${
+        className={`${buttonSize} rounded-full flex items-center justify-center transition ${
           listening
             ? "bg-red-500 hover:bg-red-600 animate-pulse"
             : loading
@@ -107,12 +102,12 @@ export default function VoiceButton({ onTranscript, botReply, disabled, token }:
         } disabled:opacity-40`}
       >
         {listening
-          ? <Square className="w-4 h-4 text-white fill-white" />
-          : <Mic className="w-4 h-4 text-sky-400" />
+          ? <Square className={`${iconSize} text-white fill-white`} />
+          : <Mic className={`${iconSize} text-sky-400`} />
         }
       </button>
-      {listening && <p className="text-xs text-red-400">Recording…</p>}
-      {loading && <p className="text-xs text-slate-400">Transcribing…</p>}
+      {listening && <p className="text-xs text-red-400">{recordingLabel}</p>}
+      {loading && <p className="text-xs text-slate-400">{loadingLabel}</p>}
       {error && <p className="text-xs text-amber-400 max-w-[90px] text-center">{error}</p>}
     </div>
   );

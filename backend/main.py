@@ -1,5 +1,22 @@
+from pathlib import Path
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
+
+def load_local_env() -> None:
+    backend_dir = Path(__file__).resolve().parent
+    repo_root_env = backend_dir.parent / ".env"
+    backend_env = backend_dir / ".env"
+
+    if repo_root_env.exists():
+        load_dotenv(repo_root_env, override=False)
+    elif backend_env.exists():
+        load_dotenv(backend_env, override=False)
+
+
+load_local_env()
 
 from database import engine, Base
 import models.models  # ensure all models are registered
