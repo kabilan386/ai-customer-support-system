@@ -7,26 +7,108 @@ interface Props {
   disabled?: boolean;
   size?: "default" | "large";
   token?: string | null;
+  onListeningStateChange?: (listening: boolean) => void;
+  onWaveformChange?: (bars: number[]) => void;
 }
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const WAVEFORM_BAR_COUNT = 7;
 
-export default function VoiceButton({ onTranscript, disabled, size = "default", token }: Props) {
+function buildWaveformBars(data: Uint8Array) {
+  const bars: number[] = [];
+  const bucketSize = Math.max(1, Math.floor(data.length / WAVEFORM_BAR_COUNT));
+
+  for (let index = 0; index < WAVEFORM_BAR_COUNT; index += 1) {
+    const start = index * bucketSize;
+    const end = Math.min(start + bucketSize, data.length);
+    let total = 0;
+
+    for (let cursor = start; cursor < end; cursor += 1) {
+      total += Math.abs(data[cursor] - 128);
+    }
+
+    const average = end > start ? total / (end - start) : 0;
+    const normalized = Math.min(1, average / 48);
+    bars.push(0.25 + normalized * 0.75);
+  }
+
+  return bars;
+}
+
+export default function VoiceButton({
+  onTranscript,
+  disabled,
+  size = "default",
+  token,
+  onListeningStateChange,
+  onWaveformChange,
+}: Props) {
   const [listening, setListening] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const onTranscriptRef = useRef(onTranscript);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
 
   useEffect(() => { onTranscriptRef.current = onTranscript; }, [onTranscript]);
+
+  function stopWaveformTracking() {
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    analyserRef.current?.disconnect();
+    analyserRef.current = null;
+    audioContextRef.current?.close();
+    audioContextRef.current = null;
+    onWaveformChange?.(Array(WAVEFORM_BAR_COUNT).fill(0.18));
+  }
+
+  function startWaveformTracking(stream: MediaStream) {
+    const audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.82;
+    source.connect(analyser);
+
+    const buffer = new Uint8Array(analyser.frequencyBinCount);
+    audioContextRef.current = audioContext;
+    analyserRef.current = analyser;
+
+    const tick = () => {
+      analyser.getByteTimeDomainData(buffer);
+      onWaveformChange?.(buildWaveformBars(buffer));
+      animationFrameRef.current = requestAnimationFrame(tick);
+    };
+
+    tick();
+  }
+
+  useEffect(() => {
+    onListeningStateChange?.(listening);
+  }, [listening, onListeningStateChange]);
+
+  useEffect(() => {
+    return () => {
+      stopWaveformTracking();
+      mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
 
   async function startListening() {
     setError("");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
       const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
       chunksRef.current = [];
+      startWaveformTracking(stream);
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
@@ -34,6 +116,8 @@ export default function VoiceButton({ onTranscript, disabled, size = "default", 
 
       recorder.onstop = async () => {
         stream.getTracks().forEach(t => t.stop());
+        mediaStreamRef.current = null;
+        stopWaveformTracking();
         const blob = new Blob(chunksRef.current, { type: "audio/webm" });
         await sendToWhisper(blob);
       };

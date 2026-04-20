@@ -22,6 +22,29 @@ interface Meta {
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const WS_BASE = API.replace(/^http/, "ws");
+const IDLE_WAVEFORM = [0.24, 0.36, 0.5, 0.68, 0.5, 0.36, 0.24];
+
+function buildPlaybackWaveformBars(data: Uint8Array) {
+  const barCount = IDLE_WAVEFORM.length;
+  const bars: number[] = [];
+  const bucketSize = Math.max(1, Math.floor(data.length / barCount));
+
+  for (let index = 0; index < barCount; index += 1) {
+    const start = index * bucketSize;
+    const end = Math.min(start + bucketSize, data.length);
+    let total = 0;
+
+    for (let cursor = start; cursor < end; cursor += 1) {
+      total += data[cursor];
+    }
+
+    const average = end > start ? total / (end - start) : 0;
+    const normalized = Math.min(1, average / 160);
+    bars.push(0.22 + normalized * 0.78);
+  }
+
+  return bars;
+}
 
 export default function ChatWindow() {
   const { token } = useAuth();
@@ -34,11 +57,29 @@ export default function ChatWindow() {
   const [agentOnline, setAgentOnline] = useState(false);
   const [voiceAssistantOpen, setVoiceAssistantOpen] = useState(false);
   const [voiceAssistantStatus, setVoiceAssistantStatus] = useState<"idle" | "loading" | "done">("idle");
+  const [voiceVisualizerMode, setVoiceVisualizerMode] = useState<"idle" | "listening" | "speaking">("idle");
+  const [voiceWaveformBars, setVoiceWaveformBars] = useState(IDLE_WAVEFORM);
   const wsRef = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastSpokenReplyRef = useRef("");
+  const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const playbackAudioContextRef = useRef<AudioContext | null>(null);
+  const playbackAnimationFrameRef = useRef<number | null>(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  function stopPlaybackWaveform() {
+    if (playbackAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(playbackAnimationFrameRef.current);
+      playbackAnimationFrameRef.current = null;
+    }
+    playbackAudioRef.current?.pause();
+    playbackAudioRef.current = null;
+    playbackAudioContextRef.current?.close();
+    playbackAudioContextRef.current = null;
+    setVoiceVisualizerMode("idle");
+    setVoiceWaveformBars(IDLE_WAVEFORM);
+  }
 
   useEffect(() => {
     if (!voiceAssistantOpen || !lastBotReply || !token) return;
@@ -64,12 +105,36 @@ export default function ChatWindow() {
         if (cancelled) return;
         audioUrl = URL.createObjectURL(blob);
         const audio = new Audio(audioUrl);
+        const audioContext = new AudioContext();
+        const source = audioContext.createMediaElementSource(audio);
+        const analyser = audioContext.createAnalyser();
+        const buffer = new Uint8Array(analyser.frequencyBinCount);
+
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.78;
+        source.connect(analyser);
+        analyser.connect(audioContext.destination);
+
+        playbackAudioRef.current = audio;
+        playbackAudioContextRef.current = audioContext;
+        setVoiceVisualizerMode("speaking");
+
+        const tick = () => {
+          analyser.getByteFrequencyData(buffer);
+          setVoiceWaveformBars(buildPlaybackWaveformBars(buffer));
+          playbackAnimationFrameRef.current = requestAnimationFrame(tick);
+        };
+
+        tick();
+
         audio.onended = () => {
           if (audioUrl) URL.revokeObjectURL(audioUrl);
+          stopPlaybackWaveform();
         };
         await audio.play();
       } catch {
         if (cancelled) return;
+        stopPlaybackWaveform();
         window.speechSynthesis.cancel();
         const utterance = new SpeechSynthesisUtterance(text);
         window.speechSynthesis.speak(utterance);
@@ -83,8 +148,18 @@ export default function ChatWindow() {
       cancelled = true;
       window.speechSynthesis.cancel();
       if (audioUrl) URL.revokeObjectURL(audioUrl);
+      stopPlaybackWaveform();
     };
   }, [lastBotReply, token, voiceAssistantOpen]);
+
+  useEffect(() => {
+    if (!voiceAssistantOpen) {
+      stopPlaybackWaveform();
+      setVoiceVisualizerMode("idle");
+      setVoiceWaveformBars(IDLE_WAVEFORM);
+      setVoiceAssistantStatus("idle");
+    }
+  }, [voiceAssistantOpen]);
 
   // Connect WebSocket when conversation starts
   useEffect(() => {
@@ -187,9 +262,7 @@ export default function ChatWindow() {
         <div className="fixed inset-0 z-[100] flex flex-col overflow-hidden bg-[radial-gradient(circle_at_top,rgba(34,211,238,0.26),rgba(8,15,30,0.99)_24%,rgba(2,6,23,1)_72%)]">
           <div className="pointer-events-none absolute inset-0 bg-slate-950/80 backdrop-blur-md" />
           <div className="pointer-events-none absolute inset-0 opacity-60">
-            <div className="absolute left-1/2 top-1/2 h-[34rem] w-[34rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-400/20 bg-cyan-400/10 blur-3xl" />
-            <div className="absolute left-1/2 top-1/2 h-[24rem] w-[24rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-300/25" />
-            <div className="absolute left-1/2 top-1/2 h-[16rem] w-[16rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-200/30" />
+            <div className="absolute left-1/2 top-1/2 h-[32rem] w-[32rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-cyan-400/10 blur-3xl" />
           </div>
 
           <div className="relative z-10 mx-auto flex w-full max-w-6xl items-start justify-end px-8 py-8">
@@ -202,32 +275,48 @@ export default function ChatWindow() {
             </button>
           </div>
 
-          <div className="relative z-10 flex flex-1 flex-col items-center justify-center px-8 pb-12 pt-4">
-            <div className="pointer-events-none relative flex h-[30rem] w-[30rem] items-center justify-center">
-              <div className="absolute inset-0 rounded-full border border-cyan-400/15 animate-ping [animation-duration:3.2s]" />
-              <div className="absolute inset-8 rounded-full border border-cyan-300/20 animate-ping [animation-duration:2.6s]" />
-              <div className="absolute inset-16 rounded-full border border-cyan-200/15 animate-ping [animation-duration:2s]" />
-              <div className="absolute inset-24 rounded-full border border-cyan-100/10" />
+          <div className="relative z-10 flex flex-1 items-center justify-center px-8 py-10">
+            <div className="flex flex-col items-center justify-center gap-10">
+              <div className="pointer-events-none relative flex h-[24rem] w-[24rem] items-center justify-center">
+                <div className={`absolute inset-0 rounded-full border border-cyan-400/14 ${voiceVisualizerMode === "idle" ? "" : "animate-ping [animation-duration:3.2s]"}`} />
+                <div className={`absolute inset-10 rounded-full border border-cyan-300/16 ${voiceVisualizerMode === "idle" ? "" : "animate-ping [animation-duration:2.4s]"}`} />
 
-              <div className="relative flex h-80 w-80 items-center justify-center rounded-full border border-cyan-300/20 bg-[radial-gradient(circle_at_30%_30%,rgba(103,232,249,0.22),rgba(8,47,73,0.42)_45%,rgba(2,6,23,0.88)_72%)] shadow-[0_0_120px_rgba(34,211,238,0.2)] backdrop-blur-xl">
-                <div className="absolute inset-10 rounded-full border border-cyan-200/10" />
-                <div className="absolute inset-16 rounded-full border border-cyan-200/10" />
+                <div className="relative flex h-72 w-72 items-center justify-center rounded-full border border-cyan-300/18 bg-[radial-gradient(circle_at_30%_30%,rgba(103,232,249,0.22),rgba(8,47,73,0.42)_45%,rgba(2,6,23,0.88)_72%)] shadow-[0_0_120px_rgba(34,211,238,0.2)] backdrop-blur-xl">
+                  <div className="absolute inset-10 rounded-full border border-cyan-200/8" />
                 <div className="flex items-end justify-center gap-3">
-                  {[44, 88, 132, 176, 132, 88, 44].map((height, index) => (
+                  {voiceWaveformBars.map((value, index) => (
                   <span
                     key={index}
                     className="w-3 rounded-full bg-gradient-to-t from-cyan-500 via-cyan-300 to-white animate-pulse"
-                    style={{ height: `${height}px`, animationDelay: `${index * 120}ms` }}
+                    style={{ height: `${Math.max(36, Math.round(value * 176))}px`, animationDelay: `${index * 120}ms` }}
                   />
                 ))}
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="relative z-20 mt-10 flex flex-col items-center gap-5 pointer-events-auto">
-              <div className="rounded-full border border-cyan-400/20 bg-slate-950/55 p-3 shadow-[0_0_40px_rgba(34,211,238,0.18)]">
-                <VoiceButton onTranscript={send} disabled={sending} size="large" token={token} />
-              </div>
+              <div className="relative z-20 flex flex-col items-center gap-5 pointer-events-auto">
+                <div className="rounded-full border border-cyan-400/20 bg-slate-950/55 p-3 shadow-[0_0_40px_rgba(34,211,238,0.18)]">
+                  <VoiceButton
+                    onTranscript={send}
+                    disabled={sending}
+                    size="large"
+                    token={token}
+                    onListeningStateChange={(listening) => {
+                      if (listening) {
+                        stopPlaybackWaveform();
+                        setVoiceVisualizerMode("listening");
+                      } else if (voiceVisualizerMode === "listening") {
+                        setVoiceVisualizerMode("idle");
+                      }
+                    }}
+                    onWaveformChange={(bars) => {
+                      if (voiceVisualizerMode !== "speaking") {
+                        setVoiceWaveformBars(bars);
+                      }
+                    }}
+                  />
+                </div>
               <div className="min-h-[72px] w-full max-w-xl">
                 {voiceAssistantStatus === "loading" && (
                   <div className="rounded-3xl border border-cyan-400/15 bg-slate-950/45 px-6 py-4 text-center text-sm text-cyan-50/80">
@@ -244,6 +333,7 @@ export default function ChatWindow() {
                     {lastBotReply.replace(/\s*(RESOLVED|UNRESOLVED)\s*$/i, "")}
                   </div>
                 )}
+              </div>
               </div>
             </div>
           </div>
