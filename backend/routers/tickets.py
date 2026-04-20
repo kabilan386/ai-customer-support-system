@@ -20,10 +20,58 @@ def list_tickets(
 ):
     if current_user.role in (UserRole.agent, UserRole.admin):
         return db.query(Ticket).order_by(Ticket.created_at.desc()).all()
-    # Customers see only their own tickets via conversations
     from models.models import Conversation
     conv_ids = [c.id for c in db.query(Conversation).filter(Conversation.user_id == current_user.id).all()]
     return db.query(Ticket).filter(Ticket.conversation_id.in_(conv_ids)).order_by(Ticket.created_at.desc()).all()
+
+
+# Must be before /{ticket_id} to avoid FastAPI matching "open-conversations" as an int
+@router.get("/open-conversations")
+def open_conversations(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in (UserRole.agent, UserRole.admin):
+        raise HTTPException(status_code=403, detail="Agents and admins only")
+    from models.models import Conversation
+    tickets = db.query(Ticket).filter(
+        Ticket.status.in_([TicketStatus.open, TicketStatus.in_progress])
+    ).order_by(Ticket.created_at.desc()).all()
+    result = []
+    for t in tickets:
+        conv = db.query(Conversation).filter(Conversation.id == t.conversation_id).first()
+        customer = db.query(User).filter(User.id == conv.user_id).first() if conv else None
+        result.append({
+            "ticket_id": t.id,
+            "conversation_id": t.conversation_id,
+            "title": t.title,
+            "priority": t.priority.value,
+            "status": t.status.value,
+            "customer_name": customer.name if customer else "Unknown",
+            "created_at": t.created_at.isoformat(),
+        })
+    return result
+
+
+@router.get("/export/csv")
+def export_tickets_csv(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in (UserRole.agent, UserRole.admin):
+        raise HTTPException(status_code=403, detail="Agents and admins only")
+    tickets = db.query(Ticket).order_by(Ticket.created_at.desc()).all()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "Title", "Category", "Priority", "Status", "Created At", "Resolved At"])
+    for t in tickets:
+        writer.writerow([t.id, t.title, t.category, t.priority.value, t.status.value, t.created_at, t.resolved_at or ""])
+    output.seek(0)
+    return FastAPIStreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=tickets.csv"},
+    )
 
 
 @router.get("/{ticket_id}", response_model=TicketOut)
@@ -47,11 +95,9 @@ def update_ticket(
 ):
     if current_user.role not in (UserRole.agent, UserRole.admin):
         raise HTTPException(status_code=403, detail="Agents and admins only")
-
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-
     if payload.priority is not None:
         ticket.priority = payload.priority
     if payload.status is not None:
@@ -62,31 +108,6 @@ def update_ticket(
             ticket.status = payload.status
     if payload.assigned_agent_id is not None:
         ticket.assigned_agent_id = payload.assigned_agent_id
-
     db.commit()
     db.refresh(ticket)
     return ticket
-
-
-@router.get("/export/csv")
-def export_tickets_csv(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if current_user.role not in (UserRole.agent, UserRole.admin):
-        raise HTTPException(status_code=403, detail="Agents and admins only")
-
-    tickets = db.query(Ticket).order_by(Ticket.created_at.desc()).all()
-
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(["ID", "Title", "Category", "Priority", "Status", "Created At", "Resolved At"])
-    for t in tickets:
-        writer.writerow([t.id, t.title, t.category, t.priority.value, t.status.value, t.created_at, t.resolved_at or ""])
-
-    output.seek(0)
-    return FastAPIStreamingResponse(
-        iter([output.getvalue()]),
-        media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=tickets.csv"},
-    )

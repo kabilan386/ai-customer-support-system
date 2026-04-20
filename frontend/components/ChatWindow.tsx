@@ -1,17 +1,18 @@
 "use client";
 import { useState, useRef, useEffect } from "react";
-import { Send, Bot, User, AlertCircle, CheckCircle } from "lucide-react";
+import { Send, Bot, User, AlertCircle, Shield } from "lucide-react";
 import SentimentBadge from "./SentimentBadge";
 import VoiceButton from "./VoiceButton";
 import { useAuth } from "@/context/AuthContext";
 
 interface Message {
   id: string;
-  role: "user" | "bot";
+  role: "user" | "bot" | "agent";
   content: string;
   sentimentScore?: number;
   sentimentLabel?: "positive" | "neutral" | "negative";
   isStreaming?: boolean;
+  senderName?: string;
 }
 
 interface Meta {
@@ -20,6 +21,7 @@ interface Meta {
 }
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const WS_BASE = API.replace(/^http/, "ws");
 
 export default function ChatWindow() {
   const { token } = useAuth();
@@ -29,9 +31,35 @@ export default function ChatWindow() {
   const [sending, setSending] = useState(false);
   const [lastBotReply, setLastBotReply] = useState<string | undefined>();
   const [lastMeta, setLastMeta] = useState<Meta>({});
+  const [agentOnline, setAgentOnline] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  // Connect WebSocket when conversation starts
+  useEffect(() => {
+    if (!convId || !token) return;
+    const ws = new WebSocket(`${WS_BASE}/ws/chat/${convId}?token=${token}`);
+    ws.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      if (data.type === "message" && data.sender === "agent") {
+        setAgentOnline(true);
+        setMessages(prev => [...prev, {
+          id: Date.now().toString(),
+          role: "agent",
+          content: data.content,
+          senderName: data.sender_name,
+        }]);
+      } else if (data.type === "system") {
+        if (data.content.includes("joined")) setAgentOnline(true);
+        if (data.content.includes("left")) setAgentOnline(false);
+        setMessages(prev => [...prev, { id: Date.now().toString(), role: "bot", content: `ℹ️ ${data.content}` }]);
+      }
+    };
+    wsRef.current = ws;
+    return () => ws.close();
+  }, [convId, token]);
 
   async function send(text?: string) {
     const msg = (text ?? input).trim();
@@ -104,8 +132,9 @@ export default function ChatWindow() {
         </div>
         <div>
           <p className="font-semibold text-white">AI Support Agent</p>
-          <p className="text-xs text-emerald-400 flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Online · GPT-4o
+          <p className="text-xs flex items-center gap-2">
+            <span className="text-emerald-400 flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Online · GPT-4o</span>
+            {agentOnline && <span className="text-violet-400 flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-violet-400 inline-block" /> Agent joined</span>}
           </p>
         </div>
       </div>
@@ -121,14 +150,19 @@ export default function ChatWindow() {
         {messages.map(m => (
           <div key={m.id} className={`flex gap-3 w-full ${m.role === "user" ? "flex-row-reverse" : ""}`}>
             <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-              m.role === "user" ? "bg-sky-500/30" : "bg-slate-700"
+              m.role === "user" ? "bg-sky-500/30" : m.role === "agent" ? "bg-violet-500/30" : "bg-slate-700"
             }`}>
-              {m.role === "user" ? <User className="w-4 h-4 text-brand-400" /> : <Bot className="w-4 h-4 text-slate-300" />}
+              {m.role === "user" ? <User className="w-4 h-4 text-sky-400" />
+                : m.role === "agent" ? <Shield className="w-4 h-4 text-violet-400" />
+                : <Bot className="w-4 h-4 text-slate-300" />}
             </div>
             <div className={`max-w-[75%] space-y-1 ${m.role === "user" ? "items-end" : "items-start"} flex flex-col`}>
+              {m.role === "agent" && <p className="text-xs text-violet-400">{m.senderName || "Agent"}</p>}
               <div className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
                 m.role === "user"
                   ? "bg-sky-600 text-white rounded-tr-sm"
+                  : m.role === "agent"
+                  ? "bg-violet-700 text-white rounded-tl-sm"
                   : "bg-slate-800 border border-slate-700 text-slate-200 rounded-tl-sm"
               } ${m.isStreaming ? "typing-cursor" : ""}`}>
                 {(m.content || (m.isStreaming ? " " : "")).replace(/\s*(RESOLVED|UNRESOLVED)\s*$/i, "")}

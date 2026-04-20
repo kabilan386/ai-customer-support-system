@@ -5,7 +5,7 @@ import { useAuth } from "@/context/AuthContext";
 import { apiFetch } from "@/lib/api";
 import KPICards from "@/components/KPICards";
 import dynamic from "next/dynamic";
-import { LogOut, MessageSquare, BarChart3, Headphones, Download, RefreshCw } from "lucide-react";
+import { LogOut, MessageSquare, BarChart3, Headphones, Download, RefreshCw, AlertTriangle } from "lucide-react";
 
 const DailyVolumeChart = dynamic(() => import("@/components/charts/DailyVolumeChart"), { ssr: false });
 const SentimentTrendChart = dynamic(() => import("@/components/charts/SentimentTrendChart"), { ssr: false });
@@ -39,6 +39,8 @@ export default function DashboardPage() {
     if (!token) { router.push("/"); return; }
     if (role === "customer") { router.push("/chat"); return; }
     fetchAll();
+    const interval = setInterval(fetchAll, 30000); // auto-refresh every 30s
+    return () => clearInterval(interval);
   }, [ready, token, role]);
 
   if (!ready) return null;
@@ -46,14 +48,15 @@ export default function DashboardPage() {
   async function fetchAll() {
     setLoading(true);
     try {
+      const safe = (p: Promise<any>, fallback: any) => p.catch(() => fallback);
       const [k, d, s, c, p, h, a] = await Promise.all([
-        apiFetch("/analytics/kpi", {}, token),
-        apiFetch("/analytics/daily-volume", {}, token),
-        apiFetch("/analytics/sentiment-trend", {}, token),
-        apiFetch("/analytics/category-breakdown", {}, token),
-        apiFetch("/analytics/peak-hours", {}, token),
-        apiFetch("/analytics/resolution-histogram", {}, token),
-        apiFetch("/analytics/agent-performance", {}, token),
+        safe(apiFetch("/analytics/kpi", {}, token), { total_tickets: 0, resolution_rate: 0, avg_response_time_seconds: 0, negative_sentiment_pct: 0 }),
+        safe(apiFetch("/analytics/daily-volume", {}, token), []),
+        safe(apiFetch("/analytics/sentiment-trend", {}, token), []),
+        safe(apiFetch("/analytics/category-breakdown", {}, token), []),
+        safe(apiFetch("/analytics/peak-hours", {}, token), []),
+        safe(apiFetch("/analytics/resolution-histogram", {}, token), []),
+        safe(apiFetch("/analytics/agent-performance", {}, token), []),
       ]);
       setKpi(k); setDaily(d); setSentiment(s); setCategory(c);
       setPeaks(p); setHistogram(h); setAgents(a);
@@ -91,6 +94,12 @@ export default function DashboardPage() {
           <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-brand-500/10 text-brand-400 font-medium text-sm">
             <BarChart3 className="w-4 h-4" /> Dashboard
           </div>
+          <button
+            onClick={() => router.push("/admin")}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700/40 text-sm transition"
+          >
+            <AlertTriangle className="w-4 h-4" /> Tickets & Live Chat
+          </button>
         </nav>
         <div className="border-t border-border pt-4 space-y-3">
           <div className="px-3">
